@@ -1,0 +1,268 @@
+use std::time::{Instant, Duration};
+use std::env;
+use std::process::{Command, exit};
+use std::fmt;
+use std::fs::{read_dir, File};
+use std::io::Read;
+use std::collections::HashMap;
+
+extern crate log;
+use log::*;
+
+extern crate env_logger;
+
+extern crate nix;
+use nix::sys::signal::kill;
+use nix::sys::wait::{WaitStatus, waitpid, WNOHANG};
+use nix::unistd::{Pid, getpid};
+use nix::sys::signal::Signal;
+
+extern crate libc;
+use libc::{prctl, PR_SET_CHILD_SUBREAPER};
+
+extern crate signal;
+use signal::trap::{Trap};
+use signal::Signal::*;
+
+#[derive(Clone, Debug)]
+pub struct Carcas {
+    pid: Pid,
+    status: Option<i8>,
+    signal: Option<Signal>,
+}
+
+impl fmt::Display for Carcas {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match (self.status, self.signal) {
+            (Some(st), None) => write!(f, "(pid={},exit={})", self.pid, st),
+            (None, Some(sig)) => write!(f, "(pid={},sig={:?})", self.pid, sig),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn reap() -> Option<Carcas> {
+    match waitpid(None, Some(WNOHANG)).unwrap() {
+        WaitStatus::Exited(pid, st) =>
+            Some(Carcas { pid, status: Some(st), signal: None }),
+        WaitStatus::Signaled(pid, sig, _) =>
+            Some(Carcas { pid, status: None, signal: Some(sig) }),
+        WaitStatus::StillAlive =>
+            None,
+        ws => {
+            debug!("uninterpreted waitpid status: {:?}", ws);
+            None
+        }
+    }
+}
+
+fn wait_for_child(trap: &mut Trap, child: Pid) -> Carcas {
+    loop {
+        match trap.next() {
+            Some(SIGCHLD) => {
+                if let Some(carcas) = reap() {
+                    if carcas.pid == child {
+                        info!("child exited {}", carcas);
+                        return carcas;
+                    } else {
+                        debug!("reaped {}", carcas);
+                    }
+                }
+            }
+            Some(SIGINT) => {
+                debug!("sending SIGINT to child (pid={})", child);
+                match kill(child, Some(SIGINT)) {
+                    Ok(()) => (),
+                    Err(e) =>
+                        warn!(
+                            "unable to send SIGINT to child (pid={}): {}",
+                            child, e),
+                }
+            }
+            Some(SIGTERM) => {
+                debug!("sending SIGTERM to child (pid={})", child);
+                match kill(child, Some(SIGTERM)) {
+                    Ok(()) => (),
+                    Err(e) =>
+                        warn!(
+                            "unable to send SIGTERM to child (pid={}): {}",
+                            child, e),
+                }
+            }
+            x => panic!("unexpected trap {:?}", x)
+        }
+    }
+}
+
+fn list_children(parent: Pid) -> Vec<Pid> {
+    read_dir("/proc").expect("unable to list /proc")
+        .filter_map(|rde| {
+            match rde {
+                Ok(de) =>
+                    if let Some(fname) = de.file_name().to_str() {
+                        match str::parse(fname) {
+                            Ok(p) => Some((de, Pid::from_raw(p))),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                _ => None,
+            }
+        })
+        .filter_map(|(de, pid)| {
+            let mut path_buf = de.path();
+            path_buf.push("stat");
+
+            let mut s = String::new();
+            let path = path_buf.as_path();
+            match File::open(path).and_then(|mut f| f.read_to_string(&mut s)) {
+                Ok(_) => {
+                    if let Some(r) = s.split_whitespace().nth(3) {
+                        match str::parse(r) {
+                            Ok(p) => Some((pid, Pid::from_raw(p))),
+                            _ => {
+                                warn!("unable to interpret field 4 in {:?}",
+                                      path);
+                                None
+                            }
+                        }
+                    } else {
+                        warn!("unable to interpret {:?}", path);
+                        None
+                    }
+                }
+                Err(e) => {
+                    warn!("unable to read {:?}: {}", path, e);
+                    None
+                }
+            }
+        })
+        .filter_map(|(pid, ppid)| {
+            if ppid == parent { Some(pid) } else { None }
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+enum OrphanState {
+    BlissfulIgnorance(Pid),
+    HasBeenSentSIGTERM(Pid),
+    HasBeenSentSIGKILL(Pid, Instant),
+    Errored(Pid, nix::Error),
+    Carcas(Carcas),
+}
+
+fn transition_orphan(os: OrphanState) -> OrphanState {
+    match os {
+        OrphanState::BlissfulIgnorance(pid) => {
+            debug!("sending SIGTERM to orphan (pid={})", pid);
+            match kill(pid, Some(SIGTERM)) {
+                Ok(()) => OrphanState::HasBeenSentSIGTERM(pid),
+                Err(e) => {
+                    warn!(
+                        "unable to send SIGTERM to orphan (pid={}): {}",
+                        pid, e);
+                    OrphanState::Errored(pid, e)
+                }
+            }
+        }
+        OrphanState::HasBeenSentSIGTERM(pid) => {
+            debug!("sending SIGKILL to orphan (pid={})", pid);
+            match kill(pid, Some(SIGKILL)) {
+                Ok(()) => OrphanState::HasBeenSentSIGKILL(pid, Instant::now()),
+                Err(e) => {
+                    warn!(
+                        "unable to send SIGKILL to orphan (pid={}): {}",
+                        pid, e);
+                    OrphanState::Errored(pid, e)
+                }
+            }
+        }
+        OrphanState::HasBeenSentSIGKILL(pid, i) => {
+            warn!("orphan ({}) lingering (since {}s) after SIGKILL",
+                  pid, i.elapsed().as_secs());
+            os
+        }
+        os@OrphanState::Carcas(_) => os,
+        os@OrphanState::Errored(_, _) => os,
+    }
+}
+
+fn in_final_state(os: &OrphanState) -> bool {
+    match *os {
+        OrphanState::BlissfulIgnorance(..) => false,
+        OrphanState::HasBeenSentSIGTERM(..) => false,
+        OrphanState::HasBeenSentSIGKILL(..) => false,
+        OrphanState::Errored(..) | OrphanState::Carcas(..) => true,
+    }
+}
+
+fn main() {
+    env_logger::init().unwrap();
+
+    unsafe { assert_eq!(prctl(PR_SET_CHILD_SUBREAPER, 1), 0); }
+
+    let mut cmdline = env::args().skip(1);
+
+    let cmd = cmdline.next().expect("specify command");
+    let child = Command::new(&cmd)
+        .args(cmdline)
+        .spawn()
+        .expect(&format!("unable to spawn {}", cmd));
+
+    let child_pid = Pid::from_raw(child.id() as i32);
+    info!("spawned child (pid={}): {}", child_pid, cmd);
+
+    let trap = &mut Trap::trap(&[SIGCHLD, SIGINT, SIGTERM]);
+
+    let child_carcas = wait_for_child(trap, child_pid);
+    info!("child terminated {}, continuing to reap its orphans", child_carcas);
+
+    let mut cs = HashMap::new();
+    let pid = getpid();
+    for p in list_children(pid) {
+        let _ = cs.insert(p, OrphanState::BlissfulIgnorance(p));
+    }
+
+    let done = |cs: &HashMap<Pid, OrphanState>|
+        cs.values().all(in_final_state);
+
+    while !done(&cs) {
+        for os in cs.values_mut() {
+            *os = transition_orphan(os.to_owned());
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while let Some(sig) = trap.wait(deadline) {
+            match sig {
+                SIGCHLD => {
+                    if let Some(c) = reap() {
+                        let _ = cs.insert(c.pid, OrphanState::Carcas(c));
+                    }
+                    if done(&cs) { break }
+                },
+                SIGINT => info!("ignoring SIGINT while reaping orphans"),
+                SIGTERM => info!("ignoring SIGTERM while reaping orphans"),
+                _ => unimplemented!(),
+            }
+        }
+
+        for p in list_children(pid) {
+            if !cs.contains_key(&p) {
+                let _ = cs.insert(p, OrphanState::BlissfulIgnorance(p));
+            }
+        }
+    }
+
+    debug!("final orphan states: {:?}", cs.values());
+
+    match child_carcas {
+        Carcas { status: Some(st), .. } => exit(st as i32),
+        Carcas { signal: Some(sig), .. } => {
+            info!("child received signal {:?}", sig);
+            exit(1)
+        }
+        _ => unreachable!(),
+    }
+}
