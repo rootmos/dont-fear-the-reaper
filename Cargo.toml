@@ -3,6 +3,10 @@ name = "dont-fear-the-reaper"
 version = "0.1.0"
 authors = ["Gustav Behm <gustav.behm@gmail.com>"]
 
+[[bin]]
+name = "reaper"
+path = "src/main.rs"
+
 [dependencies]
 libc = "0.2.33"
 signal = "0.4.1"

@@ -1,6 +1,6 @@
 TARGET=target/debug
 REAPER=$(TARGET)/reaper
-DAEMON=$(TARGET)/daemon
+DAEMON=$(TARGET)/examples/example-daemon
 
 .PHONY: test
 test: build
@@ -8,4 +8,4 @@ test: build
 
 .PHONY: build
 build:
-	cargo build --bins
+	cargo build --bins --examples
