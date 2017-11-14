@@ -25,13 +25,13 @@ use signal::trap::{Trap};
 use signal::Signal::*;
 
 #[derive(Clone, Debug)]
-pub struct Carcas {
+pub struct Carcass {
     pid: Pid,
     status: Option<i8>,
     signal: Option<Signal>,
 }
 
-impl fmt::Display for Carcas {
+impl fmt::Display for Carcass {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match (self.status, self.signal) {
             (Some(st), None) => write!(f, "(pid={},exit={})", self.pid, st),
@@ -41,12 +41,12 @@ impl fmt::Display for Carcas {
     }
 }
 
-fn reap() -> Option<Carcas> {
+fn reap() -> Option<Carcass> {
     match waitpid(None, Some(WNOHANG)).unwrap() {
         WaitStatus::Exited(pid, st) =>
-            Some(Carcas { pid, status: Some(st), signal: None }),
+            Some(Carcass { pid, status: Some(st), signal: None }),
         WaitStatus::Signaled(pid, sig, _) =>
-            Some(Carcas { pid, status: None, signal: Some(sig) }),
+            Some(Carcass { pid, status: None, signal: Some(sig) }),
         WaitStatus::StillAlive =>
             None,
         ws => {
@@ -56,16 +56,16 @@ fn reap() -> Option<Carcas> {
     }
 }
 
-fn wait_for_child(trap: &mut Trap, child: Pid) -> Carcas {
+fn wait_for_child(trap: &mut Trap, child: Pid) -> Carcass {
     loop {
         match trap.next() {
             Some(SIGCHLD) => {
-                if let Some(carcas) = reap() {
-                    if carcas.pid == child {
-                        info!("child exited {}", carcas);
-                        return carcas;
+                if let Some(carcass) = reap() {
+                    if carcass.pid == child {
+                        info!("child exited {}", carcass);
+                        return carcass;
                     } else {
-                        debug!("reaped {}", carcas);
+                        debug!("reaped {}", carcass);
                     }
                 }
             }
@@ -97,18 +97,11 @@ fn wait_for_child(trap: &mut Trap, child: Pid) -> Carcas {
 fn list_children(parent: Pid) -> Vec<Pid> {
     read_dir("/proc").expect("unable to list /proc")
         .filter_map(|rde| {
-            match rde {
-                Ok(de) =>
-                    if let Some(fname) = de.file_name().to_str() {
-                        match str::parse(fname) {
-                            Ok(p) => Some((de, Pid::from_raw(p))),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                _ => None,
-            }
+            rde.ok().and_then(|de| {
+                de.file_name().to_str()
+                    .and_then(|fname| str::parse(fname).ok())
+                    .map(|p| (de, Pid::from_raw(p)))
+            })
         })
         .filter_map(|(de, pid)| {
             let mut path_buf = de.path();
@@ -138,9 +131,8 @@ fn list_children(parent: Pid) -> Vec<Pid> {
                 }
             }
         })
-        .filter_map(|(pid, ppid)| {
-            if ppid == parent { Some(pid) } else { None }
-        })
+        .filter_map(|(pid, ppid)|
+            if ppid == parent { Some(pid) } else { None })
         .collect()
 }
 
@@ -150,7 +142,7 @@ enum OrphanState {
     HasBeenSentSIGTERM(Pid),
     HasBeenSentSIGKILL(Pid, Instant),
     Errored(Pid, nix::Error),
-    Carcas(Carcas),
+    Carcass(Carcass),
 }
 
 fn transition_orphan(os: OrphanState) -> OrphanState {
@@ -184,7 +176,7 @@ fn transition_orphan(os: OrphanState) -> OrphanState {
                   pid, i.elapsed().as_secs());
             os
         }
-        os@OrphanState::Carcas(_) => os,
+        os@OrphanState::Carcass(_) => os,
         os@OrphanState::Errored(_, _) => os,
     }
 }
@@ -194,7 +186,7 @@ fn in_final_state(os: &OrphanState) -> bool {
         OrphanState::BlissfulIgnorance(..) => false,
         OrphanState::HasBeenSentSIGTERM(..) => false,
         OrphanState::HasBeenSentSIGKILL(..) => false,
-        OrphanState::Errored(..) | OrphanState::Carcas(..) => true,
+        OrphanState::Errored(..) | OrphanState::Carcass(..) => true,
     }
 }
 
@@ -216,8 +208,8 @@ fn main() {
 
     let trap = &mut Trap::trap(&[SIGCHLD, SIGINT, SIGTERM]);
 
-    let child_carcas = wait_for_child(trap, child_pid);
-    info!("child terminated {}, continuing to reap its orphans", child_carcas);
+    let child_carcass = wait_for_child(trap, child_pid);
+    info!("child terminated {}, continuing to reap its orphans", child_carcass);
 
     let mut cs = HashMap::new();
     let pid = getpid();
@@ -238,7 +230,7 @@ fn main() {
             match sig {
                 SIGCHLD => {
                     if let Some(c) = reap() {
-                        let _ = cs.insert(c.pid, OrphanState::Carcas(c));
+                        let _ = cs.insert(c.pid, OrphanState::Carcass(c));
                     }
                     if done(&cs) { break }
                 },
@@ -257,9 +249,9 @@ fn main() {
 
     debug!("final orphan states: {:?}", cs.values());
 
-    match child_carcas {
-        Carcas { status: Some(st), .. } => exit(st as i32),
-        Carcas { signal: Some(sig), .. } => {
+    match child_carcass {
+        Carcass { status: Some(st), .. } => exit(st as i32),
+        Carcass { signal: Some(sig), .. } => {
             info!("child received signal {:?}", sig);
             exit(1)
         }
