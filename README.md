@@ -11,45 +11,25 @@ can reap and terminate the remaining orphans after your program halts.
 
 Example usage
 -------------
-In the following example, the `example-daemon` program just spits out
-its pid and becomes a daemon.
-(The `RUST_LOG` variables and `cargo run` are just for visualization and
-convenience.)
+In the following example, the `example-daemon.sh` script daemonizes
+an infinitely sleeping process and spits out its pid.
+([source](../master/examples/example-daemon.rs))
 ```shell
-$ RUST_LOG=example_daemon=debug \
-    cargo run --example example-daemon --quiet 2>/tmp/log
-3312
-$ ! timeout 5s tail --pid=3312 -f /tmp/log && echo "...just keeps going!"
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-DEBUG:example_daemon: daemon running: ppid=1
-...just keeps going!
-$ kill 3312
-$
-$ RUST_LOG=reaper=debug,example_daemon=debug \
-    reaper cargo run --example example-daemon --quiet 2>/tmp/log
-5473
-$ kill 5473
-$ cat /tmp/log
-INFO:reaper: spawned child (pid=5467): cargo
-DEBUG:example_daemon: forked daemon (pid=5473)
-DEBUG:example_daemon: stopping parent
-DEBUG:example_daemon: daemon running: ppid=5467
-INFO:reaper: child exited (pid=5467,exit=0)
-INFO:reaper: child terminated (pid=5467,exit=0), continuing to reap its orphans
-DEBUG:reaper: sending SIGTERM to orphan (pid=5473)
-DEBUG:reaper: final orphan states: [Carcas(Carcas { pid: Pid(5473), status: None, signal: Some(SIGTERM) })]
-$
+$ ./example-daemon.sh
+13204
+$ grep PPid /proc/13204/status
+PPid: 1
+$ 
+$ reaper ./example-daemon.sh
+13216
+$ stat /proc/13216
+stat: cannot stat '/proc/13216': No such file or directory
+$ 
+$ RUST_LOG=reaper=info reaper ./example-daemon.sh
+INFO:reaper: spawned child (pid=13222): ./example-daemon.sh
+INFO:reaper: child terminated (pid=13222,exit=0), continuing to reap its orphans
+INFO:reaper: sending SIGTERM to orphan (pid=13228)
+INFO:reaper: 1 orphan(s) reaped
+INFO:reaper: exiting with status=0
+13228
 ```

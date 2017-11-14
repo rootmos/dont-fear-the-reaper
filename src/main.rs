@@ -62,7 +62,6 @@ fn wait_for_child(trap: &mut Trap, child: Pid) -> Carcass {
             Some(SIGCHLD) => {
                 if let Some(carcass) = reap() {
                     if carcass.pid == child {
-                        info!("child exited {}", carcass);
                         return carcass;
                     } else {
                         debug!("reaped {}", carcass);
@@ -148,7 +147,7 @@ enum OrphanState {
 fn transition_orphan(os: OrphanState) -> OrphanState {
     match os {
         OrphanState::BlissfulIgnorance(pid) => {
-            debug!("sending SIGTERM to orphan (pid={})", pid);
+            info!("sending SIGTERM to orphan (pid={})", pid);
             match kill(pid, Some(SIGTERM)) {
                 Ok(()) => OrphanState::HasBeenSentSIGTERM(pid),
                 Err(e) => {
@@ -160,7 +159,7 @@ fn transition_orphan(os: OrphanState) -> OrphanState {
             }
         }
         OrphanState::HasBeenSentSIGTERM(pid) => {
-            debug!("sending SIGKILL to orphan (pid={})", pid);
+            info!("sending SIGKILL to orphan (pid={})", pid);
             match kill(pid, Some(SIGKILL)) {
                 Ok(()) => OrphanState::HasBeenSentSIGKILL(pid, Instant::now()),
                 Err(e) => {
@@ -247,10 +246,14 @@ fn main() {
         }
     }
 
+    info!("{} orphan(s) reaped", cs.len());
     debug!("final orphan states: {:?}", cs.values());
 
     match child_carcass {
-        Carcass { status: Some(st), .. } => exit(st as i32),
+        Carcass { status: Some(st), .. } => {
+            info!("exiting with status={}", st);
+            exit(st as i32)
+        }
         Carcass { signal: Some(sig), .. } => {
             info!("child received signal {:?}", sig);
             exit(1)
