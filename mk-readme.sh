@@ -35,14 +35,17 @@ an infinitely sleeping process and spits out its pid.
 \`\`\`shell
 EOF
 run "./example-daemon.sh"
-PID=$OUTPUT
-run "grep PPid /proc/$PID/status"
+run "grep PPid /proc/$OUTPUT/status"
 run ""
 run "reaper ./example-daemon.sh"
-PID=$OUTPUT
-run "stat /proc/$PID"
+run "stat /proc/$OUTPUT"
 run ""
 run "RUST_LOG=reaper=info reaper ./example-daemon.sh"
+run ""
+run "timeout --signal=SIGINT 2s ./lingering-parent-with-daemon.sh"
+run "grep PPid /proc/$OUTPUT/status"
+run ""
+run "RUST_LOG=reaper=info timeout --signal=SIGINT 2s reaper ./lingering-parent-with-daemon.sh"
 cat <<EOF
 \`\`\`
 EOF
