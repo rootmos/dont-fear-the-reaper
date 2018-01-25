@@ -29,7 +29,7 @@ fn main() {
             }
         }
         Ok(ForkResult::Child) => {
-            setpgid(getpid(), getpid()).unwrap();
+            //setpgid(getpid(), getpid()).unwrap();
             close(STDOUT_FILENO).unwrap();
             loop {
                 debug!("daemon running: ppid={}", getppid());

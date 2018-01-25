@@ -21,7 +21,7 @@ extern crate libc;
 use libc::{prctl, PR_SET_CHILD_SUBREAPER};
 
 extern crate signal;
-use signal::trap::{Trap};
+use signal::trap::Trap;
 use signal::Signal::*;
 
 #[derive(Clone, Debug)]
@@ -144,11 +144,11 @@ enum OrphanState {
     Carcass(Carcass),
 }
 
-fn transition_orphan(os: OrphanState) -> OrphanState {
-    match os {
+fn transition_orphan(os: &mut OrphanState) {
+    match *os {
         OrphanState::BlissfulIgnorance(pid) => {
             info!("sending SIGTERM to orphan (pid={})", pid);
-            match kill(pid, Some(SIGTERM)) {
+            *os = match kill(pid, Some(SIGTERM)) {
                 Ok(()) => OrphanState::HasBeenSentSIGTERM(pid),
                 Err(e) => {
                     warn!(
@@ -160,7 +160,7 @@ fn transition_orphan(os: OrphanState) -> OrphanState {
         }
         OrphanState::HasBeenSentSIGTERM(pid) => {
             info!("sending SIGKILL to orphan (pid={})", pid);
-            match kill(pid, Some(SIGKILL)) {
+            *os = match kill(pid, Some(SIGKILL)) {
                 Ok(()) => OrphanState::HasBeenSentSIGKILL(pid, Instant::now()),
                 Err(e) => {
                     warn!(
@@ -173,10 +173,9 @@ fn transition_orphan(os: OrphanState) -> OrphanState {
         OrphanState::HasBeenSentSIGKILL(pid, i) => {
             warn!("orphan ({}) lingering (since {}s) after SIGKILL",
                   pid, i.elapsed().as_secs());
-            os
         }
-        os@OrphanState::Carcass(_) => os,
-        os@OrphanState::Errored(_, _) => os,
+        OrphanState::Carcass(_) => (),
+        OrphanState::Errored(_, _) => (),
     }
 }
 
@@ -210,28 +209,26 @@ fn main() {
     let child_carcass = wait_for_child(trap, child_pid);
     info!("child terminated {}, continuing to reap its orphans", child_carcass);
 
-    let mut cs = HashMap::new();
+    let mut oss = HashMap::new();
     let pid = getpid();
     for p in list_children(pid) {
-        let _ = cs.insert(p, OrphanState::BlissfulIgnorance(p));
+        let _ = oss.insert(p, OrphanState::BlissfulIgnorance(p));
     }
 
-    let done = |cs: &HashMap<Pid, OrphanState>|
-        cs.values().all(in_final_state);
+    let done = |oss: &HashMap<Pid, OrphanState>|
+        oss.values().all(in_final_state);
 
-    while !done(&cs) {
-        for os in cs.values_mut() {
-            *os = transition_orphan(os.to_owned());
-        }
+    while !done(&oss) {
+        oss.values_mut().for_each(transition_orphan);
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while let Some(sig) = trap.wait(deadline) {
             match sig {
                 SIGCHLD => {
                     if let Some(c) = reap() {
-                        let _ = cs.insert(c.pid, OrphanState::Carcass(c));
+                        let _ = oss.insert(c.pid, OrphanState::Carcass(c));
                     }
-                    if done(&cs) { break }
+                    if done(&oss) { break }
                 },
                 SIGINT => info!("ignoring SIGINT while reaping orphans"),
                 SIGTERM => info!("ignoring SIGTERM while reaping orphans"),
@@ -240,14 +237,14 @@ fn main() {
         }
 
         for p in list_children(pid) {
-            if !cs.contains_key(&p) {
-                let _ = cs.insert(p, OrphanState::BlissfulIgnorance(p));
+            if !oss.contains_key(&p) {
+                let _ = oss.insert(p, OrphanState::BlissfulIgnorance(p));
             }
         }
     }
 
-    info!("{} orphan(s) reaped", cs.len());
-    debug!("final orphan states: {:?}", cs.values());
+    info!("{} orphan(s) reaped", oss.len());
+    debug!("final orphan states: {:?}", oss.values());
 
     match child_carcass {
         Carcass { status: Some(st), .. } => {
